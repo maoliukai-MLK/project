@@ -6,14 +6,50 @@ Stock Monitor v4 - 股票技术指标监控
 信号: 金叉/死叉/超卖超买/布林触轨
 """
 
-import json, os, time, sys, subprocess, urllib.request
+import json, os, time, sys, subprocess, urllib.request, urllib.error, pickle, signal
 from datetime import datetime
+from functools import wraps
 
 ANSI = {"R":"\033[91m","G":"\033[92m","Y":"\033[93m","B":"\033[94m","C":"\033[96m",
         "BOLD":"\033[1m","Z":"\033[0m","GR":"\033[90m"}
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(BASE, "state.json")
 CONFIG = os.path.join(BASE, "config.json")
+CACHE = os.path.join(BASE, "cache")
+
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+REQUEST_TIMEOUT = 15
+API_INTERVAL = 0.5
+
+_running = True
+
+def _signal_handler(signum, frame):
+    global _running
+    _running = False
+    print(f"\n{ANSI['Y']}收到退出信号，正在停止...{ANSI['Z']}")
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+def retry(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last_err = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            if not _running:
+                raise SystemExit("被用户中断")
+            try:
+                return func(*args, **kwargs)
+            except (urllib.error.URLError, urllib.error.HTTPError,
+                    OSError, ValueError) as e:
+                last_err = e
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAY * attempt
+                    print(f" ⚡重试({attempt}/{MAX_RETRIES}) {delay}s", end="", flush=True)
+                    time.sleep(delay)
+        raise last_err
+    return wrapper
 
 # ═══════════════════ 内置历史K线 ═══════════════════
 # 格式: {code: {"close":[...], "high":[...], "low":[...]}}
@@ -99,30 +135,40 @@ def calc_ma(d, p):
     return [sum(d[max(0,i-p+1):i+1])/min(i+1,p) for i in range(len(d))]
 
 # ═══════════════════ 数据获取 ═══════════════════
+def _sina_req(url):
+    req = urllib.request.Request(url, headers={"Referer": "https://finance.sina.com.cn"})
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+        return r.read().decode("gbk")
+
+@retry
 def get_price(code):
     """新浪实时行情"""
     prefix = "sz" if code.startswith("00") or code.startswith("30") else "sh"
-    url = f"https://hq.sinajs.cn/list={prefix}{code}"
-    req = urllib.request.Request(url, headers={"Referer": "https://finance.sina.com.cn"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        text = r.read().decode("gbk")
-    return float(text.split('"')[1].split(",")[3])
+    text = _sina_req(f"https://hq.sinajs.cn/list={prefix}{code}")
+    parts = text.split('"')[1].split(",")
+    if len(parts) < 4:
+        raise ValueError(f"API返回格式异常: {text[:80]}")
+    return float(parts[3])
 
+@retry
 def get_us_prices(tickers):
     """新浪美股实时行情 - 按固定顺序匹配"""
     sym = ",".join(f"gb_{t.lower()}" for t in tickers)
-    url = f"https://hq.sinajs.cn/list={sym}"
-    req = urllib.request.Request(url, headers={"Referer": "https://finance.sina.com.cn"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        text = r.read().decode("gbk")
+    text = _sina_req(f"https://hq.sinajs.cn/list={sym}")
     prices = {}
-    for i, line in enumerate(text.strip().split("\n")):
+    lines = text.strip().split("\n")
+    for i, line in enumerate(lines):
         if i >= len(tickers): break
         try:
-            price = float(line.split('"')[1].split(",")[1])
-            prices[tickers[i]] = price
-        except:
+            parts = line.split('"')
+            if len(parts) < 2: continue
+            fields = parts[1].split(",")
+            if len(fields) < 2: continue
+            prices[tickers[i]] = float(fields[1])
+        except (ValueError, IndexError):
             pass
+    if not prices:
+        raise ValueError("美股API返回数据为空")
     return prices
 
 # ═══════════════════ 信号检测 ═══════════════════
@@ -232,23 +278,46 @@ def show(results, all_sigs):
 
 # ═══════════════════ 主控 ═══════════════════
 def load_state():
-    return json.load(open(STATE)) if os.path.exists(STATE) else {}
+    if not os.path.exists(STATE):
+        return {}
+    try:
+        with open(STATE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f" ⚠状态文件损坏，将重置: {e}")
+        return {}
+
 def save_state(st):
-    json.dump(st, open(STATE,"w"), indent=2, ensure_ascii=False)
+    tmp = STATE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(st, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, STATE)
+    except OSError as e:
+        print(f" ⚠保存状态失败: {e}")
 
 def main(notify=False):
-    cfg = json.load(open(CONFIG))
+    try:
+        with open(CONFIG) as f:
+            cfg = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"✗ 配置文件读取失败: {e}")
+        sys.exit(1)
     prev = load_state()
     results = {"a":{}, "us":{}}
     all_sigs = []
 
     # A股
     for code, info in cfg.get("a_shares",{}).items():
+        if not _running:
+            print(f"\n{ANSI['Y']}已中断{ANSI['Z']}", end="")
+            break
         print(f"\n{info['name']}({code})...", end="", flush=True)
         try:
             k = KLINE.get(code)
-            if not k: raise ValueError("无内置数据")
-            # 前导补齐+最新价替换
+            if not k:
+                print(f" ✗无内置数据", end="")
+                continue
             c = [k["close"][0]]*30 + list(k["close"])
             h = [k["high"][0]]*30 + list(k["high"])
             l = [k["low"][0]]*30 + list(k["low"])
@@ -265,37 +334,52 @@ def main(notify=False):
             if sigs: all_sigs.append((code, info["name"], sigs[0]))
             print(f" ¥{p:.2f}", end="")
             if sigs: print(f" {ANSI['R']}{len(sigs)}信号{ANSI['Z']}", end="")
+        except SystemExit:
+            break
         except Exception as e:
             print(f" ✗{e}", end="")
+        finally:
+            if _running: time.sleep(API_INTERVAL)
 
     # 美股
     us_tickers = list(cfg.get("us_shares",{}).keys())
     if us_tickers:
-        time.sleep(3)
+        if _running: time.sleep(2)
         print(f"\n美股...", end="", flush=True)
         try:
             up = get_us_prices(us_tickers)
-            # 用内置K线或yfinance缓存
             for ticker in us_tickers:
-                cache_f = os.path.join(BASE, "cache", f"us_{ticker}.pkl")
+                if not _running:
+                    print(f"\n{ANSI['Y']}已中断{ANSI['Z']}", end="")
+                    break
+                cache_f = os.path.join(CACHE, f"us_{ticker}.pkl")
                 if os.path.exists(cache_f):
-                    import pickle
-                    with open(cache_f,"rb") as f:
-                        k = pickle.load(f)
-                    c = list(k["c"]); h = list(k["h"]); l = list(k["l"])
+                    try:
+                        with open(cache_f, "rb") as f:
+                            k = pickle.load(f)
+                        c = list(k["c"]); h = list(k["h"]); l = list(k["l"])
+                    except (pickle.PickleError, OSError, KeyError) as e:
+                        print(f" ⚠缓存损坏({ticker})，将重新获取", end="")
+                        os.remove(cache_f)
+                        continue
                 else:
-                    import yfinance as yf
-                    s = yf.Ticker(ticker)
-                    df = s.history(period="6mo", auto_adjust=True)
-                    if df.empty: continue
-                    c = [float(df["Close"].iloc[i]) for i in range(len(df))]
-                    h = [float(df["High"].iloc[i]) for i in range(len(df))]
-                    l = [float(df["Low"].iloc[i]) for i in range(len(df))]
-                    os.makedirs(os.path.join(BASE,"cache"), exist_ok=True)
-                    import pickle
-                    with open(cache_f,"wb") as f:
-                        pickle.dump({"c":c,"h":h,"l":l}, f)
-                    time.sleep(5)
+                    try:
+                        import yfinance as yf
+                        s = yf.Ticker(ticker)
+                        df = s.history(period="6mo", auto_adjust=True)
+                        if df.empty:
+                            print(f" ✗{ticker}无数据", end="")
+                            continue
+                        c = [float(df["Close"].iloc[i]) for i in range(len(df))]
+                        h = [float(df["High"].iloc[i]) for i in range(len(df))]
+                        l = [float(df["Low"].iloc[i]) for i in range(len(df))]
+                        os.makedirs(CACHE, exist_ok=True)
+                        with open(cache_f, "wb") as f:
+                            pickle.dump({"c":c,"h":h,"l":l}, f)
+                    except Exception as e:
+                        print(f" ✗{ticker}下载失败:{e}", end="")
+                        if _running: time.sleep(2)
+                        continue
 
                 p = up.get(ticker, c[-1])
                 c_pre = [c[0]]*30 + c; h_pre = [h[0]]*30 + h; l_pre = [l[0]]*30 + l
@@ -312,6 +396,9 @@ def main(notify=False):
                 if sigs: all_sigs.append((ticker, info["name"], sigs[0]))
                 print(f" ${p:.2f}", end="")
                 if sigs: print(f" {ANSI['R']}{len(sigs)}信号{ANSI['Z']}", end="")
+                if _running: time.sleep(API_INTERVAL)
+        except SystemExit:
+            pass
         except Exception as e:
             print(f" ✗{e}", end="")
 
@@ -326,11 +413,13 @@ def main(notify=False):
 
     if notify and all_sigs:
         for code, name, (sn,_,_) in all_sigs:
+            if not _running: break
             try:
                 subprocess.run(["osascript","-e",
                     f'display notification "{code} {name}: {sn}" with title "📊 股票信号"'
                 ], capture_output=True, timeout=5)
-            except: pass
+            except (subprocess.TimeoutExpired, OSError):
+                pass
 
 if __name__ == "__main__":
     main(notify="--notify" in sys.argv)
