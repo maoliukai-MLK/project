@@ -171,6 +171,75 @@ def get_us_prices(tickers):
         raise ValueError("美股API返回数据为空")
     return prices
 
+@retry
+def get_hk_price(code):
+    """新浪港股实时行情,字段[6]为当前价"""
+    text = _sina_req(f"https://hq.sinajs.cn/list=rt_hk{code}")
+    parts = text.split('"')[1].split(",")
+    if len(parts) < 7:
+        raise ValueError(f"港股API返回格式异常: {text[:80]}")
+    name = parts[1]
+    price = float(parts[6])
+    return name, price
+
+def _yf_kline(symbol, period="6mo"):
+    """通过 yfinance 拉取历史K线,返回 (c,h,l) 三个 list"""
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise ValueError("需要 yfinance 库: pip install yfinance")
+    df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
+    if df.empty:
+        raise ValueError(f"yfinance 无数据: {symbol}")
+    n = len(df)
+    return ([float(df["Close"].iloc[i]) for i in range(n)],
+            [float(df["High"].iloc[i]) for i in range(n)],
+            [float(df["Low"].iloc[i]) for i in range(n)])
+
+def get_kline(market, code):
+    """获取历史K线: A股优先用内置 KLINE dict,否则 yfinance 兜底"""
+    if market == "hs":
+        k = KLINE.get(code)
+        if k:
+            c = [k["close"][0]]*30 + list(k["close"])
+            h = [k["high"][0]]*30 + list(k["high"])
+            l = [k["low"][0]]*30 + list(k["low"])
+            return c, h, l
+        sym = (("sz" if code.startswith("00") or code.startswith("30") else "sh") + code)
+    elif market == "us":
+        sym = code
+    elif market == "hk":
+        sym = f"{int(code):04d}.HK"
+    else:
+        raise ValueError(f"暂不支持的市场: {market}")
+    c, h, l = _yf_kline(sym)
+    return ([c[0]]*30 + c, [h[0]]*30 + h, [l[0]]*30 + l)
+
+def quote(market, code):
+    """统一行情入口: market in {hs, us, hk},返回 {price, name, last, signals}"""
+    prev = load_state()
+    cfg = json.load(open(CONFIG)) if os.path.exists(CONFIG) else {}
+    if market == "hs":
+        info = cfg.get("a_shares", {}).get(code, {})
+        name = info.get("name", code)
+        c, h, l = get_kline("hs", code)
+        p = get_price(code)
+    elif market == "us":
+        info = cfg.get("us_shares", {}).get(code, {})
+        name = info.get("name", code)
+        c, h, l = get_kline("us", code)
+        p_dict = get_us_prices([code])
+        p = p_dict.get(code, c[-1])
+    elif market == "hk":
+        name, p = get_hk_price(code)
+        c, h, l = get_kline("hk", code)
+    else:
+        raise ValueError(f"未知市场: {market}")
+    c[-1] = p
+    sigs, last = detect(c, h, l, prev.get(code, {}))
+    return {"market": market, "code": code, "name": name,
+            "price": p, "last": last, "signals": sigs}
+
 # ═══════════════════ 信号检测 ═══════════════════
 def detect(c, h, l, prev):
     """计算所有指标并检测信号"""

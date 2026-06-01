@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 股票监控 Demo</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+  .tab-active { background: #3b82f6; color: white; }
+  .tab-inactive { background: #1e293b; color: #94a3b8; }
+  .signal-buy { background: rgba(16, 185, 129, 0.15); border-left: 3px solid #10b981; }
+  .signal-sell { background: rgba(239, 68, 68, 0.15); border-left: 3px solid #ef4444; }
+  .signal-warn { background: rgba(245, 158, 11, 0.15); border-left: 3px solid #f59e0b; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+  .chip-up { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+  .chip-dn { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+  .loading-pulse { animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  input::placeholder { color: #64748b; }
+</style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+<div id="app" class="max-w-4xl mx-auto">
+
+  <header class="mb-6">
+    <h1 class="text-2xl md:text-3xl font-bold flex items-center gap-2">
+      <span>📊</span><span>股票监控</span>
+      <span class="text-sm font-normal text-slate-400 ml-2">Web Demo</span>
+    </h1>
+    <p class="text-sm text-slate-400 mt-1">支持沪深 / 美股 / 港股 · MACD · KDJ · RSI · BOLL · MA</p>
+  </header>
+
+  <!-- 市场切换 Tab -->
+  <div class="flex gap-2 mb-4">
+    <button v-for="m in markets" :key="m.key"
+            @click="market = m.key; code = ''"
+            :class="market === m.key ? 'tab-active' : 'tab-inactive hover:bg-slate-700'"
+            class="px-4 py-2 rounded-lg font-medium transition">
+      {{ m.label }}
+    </button>
+  </div>
+
+  <!-- 查询区 -->
+  <div class="card p-4 mb-4">
+    <div class="flex flex-col md:flex-row gap-3">
+      <input v-model="code" @keyup.enter="fetchQuote"
+             :placeholder="currentMarket.placeholder"
+             class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+             autocomplete="off">
+      <button @click="fetchQuote" :disabled="loading || !code"
+              class="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg font-medium transition">
+        <span v-if="loading" class="loading-pulse">查询中...</span>
+        <span v-else>查询</span>
+      </button>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2 items-center text-sm text-slate-400">
+      <span>示例:</span>
+      <button v-for="ex in currentMarket.examples" :key="ex[0]"
+              @click="code = ex[0]; fetchQuote()"
+              class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300">
+        {{ ex[0] }} {{ ex[1] }}
+      </button>
+    </div>
+  </div>
+
+  <!-- 错误 -->
+  <div v-if="error" class="card p-4 mb-4 border-red-500 border bg-red-900/20">
+    <div class="flex items-center gap-2 text-red-300">
+      <span>✗</span><span>{{ error }}</span>
+    </div>
+  </div>
+
+  <!-- 空态 -->
+  <div v-if="!data && !loading && !error" class="card p-8 text-center text-slate-400">
+    <div class="text-4xl mb-2">🔍</div>
+    <div>输入股票代码开始查询</div>
+  </div>
+
+  <!-- Loading -->
+  <div v-if="loading" class="card p-8 text-center loading-pulse text-slate-400">
+    <div class="text-2xl mb-2">⏳</div>
+    <div>正在获取行情与指标...</div>
+  </div>
+
+  <!-- 结果 -->
+  <div v-if="data && !loading" class="space-y-4">
+
+    <!-- 头部: 价格 -->
+    <div class="card p-5">
+      <div class="flex justify-between items-start">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="chip" :class="marketChipCls(data.market)">{{ marketLabel(data.market) }}</span>
+            <span class="font-mono text-slate-300">{{ data.code }}</span>
+            <span class="text-slate-400 text-sm">{{ data.name }}</span>
+          </div>
+          <div class="text-4xl font-bold font-mono">
+            {{ formatPrice(data.price, data.market) }}
+          </div>
+        </div>
+        <div class="text-right text-xs text-slate-500">
+          <div>{{ data.last.date }}</div>
+          <div class="mt-1">实时报价</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 技术指标 -->
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">MACD</div>
+        <div class="font-mono text-sm">
+          <div>DIF <span :class="numCls(data.last.dif)">{{ data.last.dif.toFixed(3) }}</span></div>
+          <div>DEA <span :class="numCls(data.last.dea)">{{ data.last.dea.toFixed(3) }}</span></div>
+          <div class="mt-1">
+            <span class="chip" :class="data.last.macd >= 0 ? 'chip-up' : 'chip-dn'">
+              {{ data.last.macd >= 0 ? '红柱' : '绿柱' }} {{ Math.abs(data.last.macd).toFixed(3) }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">KDJ</div>
+        <div class="font-mono text-sm">
+          <div>K <span :class="kdjCls(data.last.k, 20, 80)">{{ data.last.k.toFixed(1) }}</span></div>
+          <div>D {{ data.last.d.toFixed(1) }}</div>
+          <div>J <span :class="kdjCls(data.last.j, 0, 100)">{{ data.last.j.toFixed(1) }}</span></div>
+        </div>
+      </div>
+
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">RSI</div>
+        <div class="font-mono">
+          <div class="text-2xl" :class="rsiCls(data.last.rsi)">{{ data.last.rsi.toFixed(1) }}</div>
+          <div class="text-xs text-slate-500 mt-1">
+            <span v-if="data.last.rsi < 30">超卖 ⚠</span>
+            <span v-else-if="data.last.rsi > 70">超买 ⚠</span>
+            <span v-else>正常区间</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">MA</div>
+        <div class="font-mono text-sm">
+          <div>MA5  <span class="text-slate-200">{{ data.last.ma5.toFixed(2) }}</span></div>
+          <div>MA20 <span :class="data.last.ma20 ? 'text-slate-200' : 'text-slate-500'">
+            {{ data.last.ma20 ? data.last.ma20.toFixed(2) : 'N/A' }}
+          </span></div>
+        </div>
+      </div>
+
+      <div class="card p-4 md:col-span-2">
+        <div class="text-xs text-slate-400 mb-2">BOLL 布林带</div>
+        <div class="flex items-center gap-3 font-mono text-sm">
+          <div>
+            <div class="text-xs text-slate-500">上轨</div>
+            <div class="text-red-400">{{ data.last.boll_up?.toFixed(2) ?? 'N/A' }}</div>
+          </div>
+          <div class="flex-1 text-center">
+            <div class="text-xs text-slate-500">中轨</div>
+            <div class="text-slate-200">{{ data.last.boll_mid?.toFixed(2) ?? 'N/A' }}</div>
+          </div>
+          <div class="text-right">
+            <div class="text-xs text-slate-500">下轨</div>
+            <div class="text-green-400">{{ data.last.boll_dn?.toFixed(2) ?? 'N/A' }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 信号 -->
+    <div class="card p-4">
+      <div class="flex justify-between items-center mb-3">
+        <h3 class="font-medium">交易信号</h3>
+        <span class="text-xs text-slate-400">
+          {{ data.signals.length === 0 ? '无新信号' : data.signals.length + ' 条' }}
+        </span>
+      </div>
+      <div v-if="data.signals.length === 0" class="text-center text-slate-500 py-6">
+        暂无新信号触发
+      </div>
+      <div v-else class="space-y-2">
+        <div v-for="(s, i) in data.signals" :key="i"
+             :class="signalCls(s[1])"
+             class="p-3 rounded">
+          <div class="flex justify-between items-center">
+            <div>
+              <div class="font-medium">{{ s[0] }}</div>
+              <div class="text-xs text-slate-400 mt-0.5">{{ s[2] }}</div>
+            </div>
+            <span class="chip" :class="actionCls(s[1])">{{ s[1] }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    return {
+      markets: [],
+      market: 'hs',
+      code: '',
+      data: null,
+      loading: false,
+      error: ''
+    };
+  },
+  computed: {
+    currentMarket() {
+      return this.markets.find(m => m.key === this.market) || { placeholder: '', examples: [] };
+    }
+  },
+  async mounted() {
+    try {
+      const r = await fetch('/api/markets');
+      const data = await r.json();
+      this.markets = Object.entries(data).map(([key, v]) => ({ key, ...v }));
+    } catch (e) {
+      this.error = '加载市场列表失败: ' + e.message;
+    }
+  },
+  methods: {
+    async fetchQuote() {
+      if (!this.code) return;
+      this.loading = true;
+      this.error = '';
+      this.data = null;
+      try {
+        const r = await fetch(`/api/quote?market=${this.market}&code=${encodeURIComponent(this.code)}`);
+        const json = await r.json();
+        if (!r.ok || json.error) throw new Error(json.error || `HTTP ${r.status}`);
+        this.data = json;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.loading = false;
+      }
+    },
+    marketLabel(m) {
+      const x = this.markets.find(x => x.key === m);
+      return x ? x.label : m;
+    },
+    marketChipCls(m) {
+      return { 'hs': 'chip-up', 'us': 'chip-dn', 'hk': '' }[m] || '';
+    },
+    formatPrice(p, m) {
+      const v = p.toFixed(m === 'us' ? 2 : 3);
+      return m === 'us' ? '$' + v : '¥' + v;
+    },
+    numCls(v) { return v >= 0 ? 'text-green-400' : 'text-red-400'; },
+    kdjCls(v, lo, hi) {
+      if (v < lo) return 'text-green-400';
+      if (v > hi) return 'text-red-400';
+      return 'text-slate-200';
+    },
+    rsiCls(v) {
+      if (v < 30) return 'text-green-400';
+      if (v > 70) return 'text-red-400';
+      return 'text-slate-200';
+    },
+    signalCls(action) {
+      return { BUY: 'signal-buy', SELL: 'signal-sell', WARN: 'signal-warn' }[action] || '';
+    },
+    actionCls(action) {
+      return { BUY: 'chip-up', SELL: 'chip-dn', WARN: 'chip-dn' }[action] || '';
+    }
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
