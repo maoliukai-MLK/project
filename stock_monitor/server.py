@@ -80,11 +80,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not Found")
 
 
+class ReusableServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
 def main():
     print(f"📊 Stock Monitor Web Demo")
     print(f"   打开 http://localhost:{PORT}/")
     print(f"   按 Ctrl+C 停止")
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    try:
+        ReusableServer(("0.0.0.0", PORT), Handler).serve_forever()
+    except OSError as e:
+        if e.errno == 48:
+            print(f"\n✗ 端口 {PORT} 被占用。可用方法:")
+            print(f"   lsof -ti:{PORT} | xargs kill -9")
+            print(f"   或换个端口: PORT=8001 python3 server.py")
+        raise
 
 
 if __name__ == "__main__":
