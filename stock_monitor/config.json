@@ -1,0 +1,20 @@
+{
+  "a_shares": {
+    "002334": { "name": "英威腾", "shares": 4000, "cost": 9.96 },
+    "301007": { "name": "德迈仕", "shares": 2000, "cost": 37.392 }
+  },
+  "us_shares": {
+    "DXYZ": { "name": "Destiny Tech100", "shares": 5, "cost": 64.574 },
+    "JD": { "name": "京东", "shares": 10, "cost": 33.496 },
+    "LUNR": { "name": "Intuitive Machines", "shares": 2, "cost": 42.85 },
+    "MU": { "name": "美光科技", "shares": 0.6, "cost": 803.933 },
+    "RKLB": { "name": "Rocket Lab", "shares": 0.6, "cost": 144.683 },
+    "TSLA": { "name": "特斯拉", "shares": 2.3547, "cost": 375.274 }
+  },
+  "thresholds": {
+    "kdj_oversold": 20,
+    "kdj_overbought": 80,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70
+  }
+}
