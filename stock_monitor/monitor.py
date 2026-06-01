@@ -347,46 +347,23 @@ def show(results, all_sigs):
 
 # ═══════════════════ 主控 ═══════════════════
 def load_state():
-    if not os.path.exists(STATE):
-        return {}
-    try:
-        with open(STATE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f" ⚠状态文件损坏，将重置: {e}")
-        return {}
-
+    return json.load(open(STATE)) if os.path.exists(STATE) else {}
 def save_state(st):
-    tmp = STATE + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(st, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, STATE)
-    except OSError as e:
-        print(f" ⚠保存状态失败: {e}")
+    json.dump(st, open(STATE,"w"), indent=2, ensure_ascii=False)
 
 def main(notify=False):
-    try:
-        with open(CONFIG) as f:
-            cfg = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"✗ 配置文件读取失败: {e}")
-        sys.exit(1)
+    cfg = json.load(open(CONFIG))
     prev = load_state()
     results = {"a":{}, "us":{}}
     all_sigs = []
 
     # A股
     for code, info in cfg.get("a_shares",{}).items():
-        if not _running:
-            print(f"\n{ANSI['Y']}已中断{ANSI['Z']}", end="")
-            break
         print(f"\n{info['name']}({code})...", end="", flush=True)
         try:
             k = KLINE.get(code)
-            if not k:
-                print(f" ✗无内置数据", end="")
-                continue
+            if not k: raise ValueError("无内置数据")
+            # 前导补齐+最新价替换
             c = [k["close"][0]]*30 + list(k["close"])
             h = [k["high"][0]]*30 + list(k["high"])
             l = [k["low"][0]]*30 + list(k["low"])
@@ -403,52 +380,37 @@ def main(notify=False):
             if sigs: all_sigs.append((code, info["name"], sigs[0]))
             print(f" ¥{p:.2f}", end="")
             if sigs: print(f" {ANSI['R']}{len(sigs)}信号{ANSI['Z']}", end="")
-        except SystemExit:
-            break
         except Exception as e:
             print(f" ✗{e}", end="")
-        finally:
-            if _running: time.sleep(API_INTERVAL)
 
     # 美股
     us_tickers = list(cfg.get("us_shares",{}).keys())
     if us_tickers:
-        if _running: time.sleep(2)
+        time.sleep(3)
         print(f"\n美股...", end="", flush=True)
         try:
             up = get_us_prices(us_tickers)
+            # 用内置K线或yfinance缓存
             for ticker in us_tickers:
-                if not _running:
-                    print(f"\n{ANSI['Y']}已中断{ANSI['Z']}", end="")
-                    break
-                cache_f = os.path.join(CACHE, f"us_{ticker}.pkl")
+                cache_f = os.path.join(BASE, "cache", f"us_{ticker}.pkl")
                 if os.path.exists(cache_f):
-                    try:
-                        with open(cache_f, "rb") as f:
-                            k = pickle.load(f)
-                        c = list(k["c"]); h = list(k["h"]); l = list(k["l"])
-                    except (pickle.PickleError, OSError, KeyError) as e:
-                        print(f" ⚠缓存损坏({ticker})，将重新获取", end="")
-                        os.remove(cache_f)
-                        continue
+                    import pickle
+                    with open(cache_f,"rb") as f:
+                        k = pickle.load(f)
+                    c = list(k["c"]); h = list(k["h"]); l = list(k["l"])
                 else:
-                    try:
-                        import yfinance as yf
-                        s = yf.Ticker(ticker)
-                        df = s.history(period="6mo", auto_adjust=True)
-                        if df.empty:
-                            print(f" ✗{ticker}无数据", end="")
-                            continue
-                        c = [float(df["Close"].iloc[i]) for i in range(len(df))]
-                        h = [float(df["High"].iloc[i]) for i in range(len(df))]
-                        l = [float(df["Low"].iloc[i]) for i in range(len(df))]
-                        os.makedirs(CACHE, exist_ok=True)
-                        with open(cache_f, "wb") as f:
-                            pickle.dump({"c":c,"h":h,"l":l}, f)
-                    except Exception as e:
-                        print(f" ✗{ticker}下载失败:{e}", end="")
-                        if _running: time.sleep(2)
-                        continue
+                    import yfinance as yf
+                    s = yf.Ticker(ticker)
+                    df = s.history(period="6mo", auto_adjust=True)
+                    if df.empty: continue
+                    c = [float(df["Close"].iloc[i]) for i in range(len(df))]
+                    h = [float(df["High"].iloc[i]) for i in range(len(df))]
+                    l = [float(df["Low"].iloc[i]) for i in range(len(df))]
+                    os.makedirs(os.path.join(BASE,"cache"), exist_ok=True)
+                    import pickle
+                    with open(cache_f,"wb") as f:
+                        pickle.dump({"c":c,"h":h,"l":l}, f)
+                    time.sleep(5)
 
                 p = up.get(ticker, c[-1])
                 c_pre = [c[0]]*30 + c; h_pre = [h[0]]*30 + h; l_pre = [l[0]]*30 + l
@@ -465,9 +427,6 @@ def main(notify=False):
                 if sigs: all_sigs.append((ticker, info["name"], sigs[0]))
                 print(f" ${p:.2f}", end="")
                 if sigs: print(f" {ANSI['R']}{len(sigs)}信号{ANSI['Z']}", end="")
-                if _running: time.sleep(API_INTERVAL)
-        except SystemExit:
-            pass
         except Exception as e:
             print(f" ✗{e}", end="")
 
@@ -482,13 +441,11 @@ def main(notify=False):
 
     if notify and all_sigs:
         for code, name, (sn,_,_) in all_sigs:
-            if not _running: break
             try:
                 subprocess.run(["osascript","-e",
                     f'display notification "{code} {name}: {sn}" with title "📊 股票信号"'
                 ], capture_output=True, timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
+            except: pass
 
 if __name__ == "__main__":
     main(notify="--notify" in sys.argv)
